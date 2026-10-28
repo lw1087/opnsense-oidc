@@ -38,7 +38,12 @@ class OidcClient extends OpenIDConnectClient
         $this->request = $controller->request;
         $this->response = $controller->response;
 
-        $this->setRedirectURL("{$this->request->getScheme()}://{$this->request->getHeader('HOST')}{$callback}");
+        // Prefer the configured redirect URI, the Host header is client controlled
+        if (!empty($auth->oidcRedirectUri)) {
+            $this->setRedirectURL($auth->oidcRedirectUri);
+        } else {
+            $this->setRedirectURL("{$this->request->getScheme()}://{$this->request->getHeader('HOST')}{$callback}");
+        }
     }
 
     public function getWellKnownClaims() {
@@ -78,9 +83,9 @@ class OidcClient extends OpenIDConnectClient
 
     private static function stripWellKnown($providerUrl) {
         $position = strpos($providerUrl, '.well-known/');
-        if ($position >= 0)
-            return substr($providerUrl, 0, $position);
-        return $providerUrl;
+        if ($position !== false)
+            $providerUrl = substr($providerUrl, 0, $position);
+        return rtrim($providerUrl, '/');
     }
 
     private function phpseclib_autoload($namespace, $dir)

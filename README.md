@@ -6,7 +6,7 @@ This package will allow you and your administrators to login to the OPNsense das
 # Installation
 Download the package from releases and install on your opnsense via the console:
 ```
-pkg add os-oidc-1.0.pkg
+pkg add os-oidc-0.3.pkg
 ```
 
 ## Configuration
@@ -54,16 +54,42 @@ As an example, here is one that makes a nice big icon next to the login button
 |--------|-------|
 | ![old login](https://i.lu.je/2025/firefox_laeaoIMkWI.png) | ![new login](https://i.lu.je/2025/firefox_q6dNnOaA8b.png) |
 
-## Mapping
-Users being logged in are mapped against the `preferred_name` claim and is checked against the local database's username and email fields.
+### Redirect URI
+Fixed callback URL registered at the provider, e.g. `https://fw.example.com/api/oidc/auth/callback`. When empty the URL is derived from the request `Host` header, which is not recommended.
 
-There is no group maaping at this stage.
+### Allowed tenant ID
+Microsoft Entra ID only. Tokens whose `tid` claim differs from this value are rejected.
+
+### Query UserInfo endpoint
+Merges claims from the UserInfo endpoint into the ID token claims (ID token claims win). Keep disabled for Entra ID.
+
+### Match users by email
+Also matches local users by the `email` claim. Disabled by default because many providers (Entra ID included) do not guarantee a verified, immutable email.
+
+### Group claim / Group mapping
+`Group claim` names the claim holding roles or groups (`roles` by default). `Group mapping` holds one `claimValue=localGroup` per line:
+```
+OPNsense.Admin=admins
+OPNsense.ReadOnly=readonly
+```
+
+### Synchronize groups
+On every login the user is added to the mapped local groups present in the token and removed from mapped groups that are not. Groups that do not appear in the mapping are never touched.
+
+### Require mapped group
+Denies the login when none of the claim values is present in the mapping.
+
+## Mapping
+Users are matched by the configured `Username claim` taken from the **verified ID token** (and by `email` only when *Match users by email* is enabled).
+New users (only with *Automatic user creation*) receive the `Default groups` plus the mapped groups.
+
+Every login, denial and group change is written to the audit log (*System → Log Files → Audit*).
 
 ## Provider Setup
 ### All Providers
 | Property | Value |
 |----------|-------|
-| Callback | `https://<ip of opnsense>>/api/oidc/auth/callback` |
+| Callback | `https://<ip of opnsense>/api/oidc/auth/callback` |
 
 ### PocketID
 provider:
@@ -77,6 +103,37 @@ client (opnsense):
 | Setting | Value | 
 |---------|-------|
 | Username claim | `preferred_username` |
+
+### Microsoft Entra ID
+**App registration** (*Entra admin center → App registrations → New registration*):
+| Property | Value |
+|----------|-------|
+| Supported account types | Single tenant |
+| Redirect URI (Web) | `https://<fqdn of opnsense>/api/oidc/auth/callback` |
+| Certificates & secrets | New client secret (store it in a vault, note the expiry) |
+| App roles | `OPNsense.Admin`, `OPNsense.ReadOnly` (allowed member types: Users/Groups) |
+| Token configuration | optional claim `email` (ID token) |
+
+**Enterprise application** (same name): *Properties → Assignment required = Yes*, then assign users or groups to the app roles under *Users and groups*. Protect it with a Conditional Access policy requiring MFA.
+
+> App roles are emitted in the `roles` claim of the ID token and avoid the groups overage limit (200 groups) of the `groups` claim.
+
+client (opnsense):
+| Setting | Value |
+|---------|-------|
+| Provider URL | `https://login.microsoftonline.com/<tenant-id>/v2.0` |
+| Username claim | `preferred_username` (UPN) |
+| Scopes | `openid,profile,email` |
+| Redirect URI | `https://<fqdn of opnsense>/api/oidc/auth/callback` |
+| Allowed tenant ID | `<tenant-id>` |
+| Query UserInfo endpoint | disabled |
+| Group claim | `roles` |
+| Group mapping | `OPNsense.Admin=admins` |
+| Synchronize groups | enabled |
+| Require mapped group | enabled |
+
+Create the local users beforehand with the UPN as username (or enable *Automatic user creation*), and keep the `Local Database` as a fallback authentication server with a break-glass `root` account.
+The firewall itself needs outbound HTTPS to `login.microsoftonline.com`.
 
 ### Authentik
 WIP
@@ -119,5 +176,3 @@ Here are the steps i have gotten to work with setup.
 6. Copy the project's content to `/usr/plugins/devel/project-name`
 7. Build with `cd /usr/plugins/devel/project-name && make package`
 8. Install `pkg add /usr/plugins/devel/project-name/work/pkg/*.pkg`
-
-9. 

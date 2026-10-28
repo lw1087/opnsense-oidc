@@ -1,3 +1,5 @@
 Interactive OpenID Connect (OIDC) authentication backend for OPNsense.
-Provides an Authorization Code + PKCE browser flow and maps resulting
-ID token claims to an OPNsense user identity for GUI login.
+Provides an Authorization Code browser flow and maps the verified
+ID token claims to an OPNsense user identity for GUI login, with
+optional role/group claim mapping to local groups (e.g. Microsoft
+Entra ID app roles) and tenant restriction.
