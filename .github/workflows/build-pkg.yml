@@ -3,6 +3,7 @@ name: 📦 Build Package
 on:
     push:
         branches: [ main ]
+        tags: [ 'v*' ]
     pull_request:
         branches: [ main ]
 
@@ -12,6 +13,9 @@ on:
 env:
   PLUGIN_NAME: oidc
   PLUGIN_CATEGORY: devel
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -32,9 +36,10 @@ jobs:
           usesh: true
           release: "14.3"
           prepare: |
-            pkg install -y git gmake
+            pkg install -y git gmake php83
           run: |
             cd $PLUGIN_CATEGORY/$PLUGIN_NAME
+            find src -name '*.php' -exec php -l {} \; | grep -v '^No syntax errors'; test $? -eq 1
             make package
 
       - name: Upload artifact
@@ -42,3 +47,10 @@ jobs:
         with:
           name: os-${{ env.PLUGIN_NAME }}
           path: ${{ env.PLUGIN_CATEGORY }}/${{ env.PLUGIN_NAME }}/work/pkg/*.pkg
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.PLUGIN_CATEGORY }}/${{ env.PLUGIN_NAME }}/work/pkg/*.pkg
+          generate_release_notes: true

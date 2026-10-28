@@ -55,6 +55,16 @@ class OIDC extends Local implements IAuthConnector
     public $oidcCustomButton = null;
     public $oidcIconUrl = null;
 
+    // Identity and authorization (Microsoft Entra ID friendly)
+    public $oidcRedirectUri = null;
+    public $oidcUseUserInfo = false;
+    public $oidcMatchEmail = false;
+    public $oidcAllowedTenant = null;
+    public $oidcGroupClaim = 'roles';
+    public $oidcGroupMap = [];
+    public $oidcGroupSync = false;
+    public $oidcRequireGroup = false;
+
 
     /**
      * type name in configuration
@@ -91,6 +101,13 @@ class OIDC extends Local implements IAuthConnector
             'oidc_icon_url' => 'oidcIconUrl',
             'oidc_create_users' => 'oidcCreateUsers',
             'oidc_username_claim' => 'oidcUsernameClaim',
+            'oidc_redirect_uri' => 'oidcRedirectUri',
+            'oidc_use_userinfo' => 'oidcUseUserInfo',
+            'oidc_match_email' => 'oidcMatchEmail',
+            'oidc_allowed_tenant' => 'oidcAllowedTenant',
+            'oidc_group_claim' => 'oidcGroupClaim',
+            'oidc_group_sync' => 'oidcGroupSync',
+            'oidc_require_group' => 'oidcRequireGroup',
         ];
 
         // >> map properties 1-on-1
@@ -100,8 +117,73 @@ class OIDC extends Local implements IAuthConnector
             }
         }
 
-        $this->oidcDefaultGroups = explode(',', $config['oidc_default_groups']);
-        $this->oidcScopes = explode(',', $config['oidc_scopes']);
+        $this->oidcDefaultGroups = array_values(array_filter(array_map('trim', explode(',', $config['oidc_default_groups'] ?? ''))));
+        if (!empty($config['oidc_scopes'])) {
+            $this->oidcScopes = array_values(array_filter(array_map('trim', explode(',', $config['oidc_scopes']))));
+        }
+        $this->oidcGroupMap = static::parseGroupMap($config['oidc_group_map'] ?? '');
+    }
+
+    /**
+     * parse "claimValue=localGroup" entries separated by newlines, commas or semicolons
+     * @param string $value raw configuration value
+     * @return array claim value => list of local group names
+     */
+    public static function parseGroupMap($value)
+    {
+        $map = [];
+        foreach (preg_split('/[\r\n,;]+/', (string)$value) as $entry) {
+            $parts = explode('=', $entry, 2);
+            if (count($parts) !== 2) {
+                continue;
+            }
+            $claimValue = trim($parts[0]);
+            $localGroup = trim($parts[1]);
+            if ($claimValue === '' || $localGroup === '') {
+                continue;
+            }
+            $map[$claimValue][] = $localGroup;
+        }
+        return $map;
+    }
+
+    /**
+     * resolve the local groups granted by the values of the configured group claim
+     * @param object $claims verified token claims
+     * @return array|null list of local group names, null when no mapping is configured
+     */
+    public function resolveMappedGroups($claims)
+    {
+        if (empty($this->oidcGroupMap)) {
+            return null;
+        }
+
+        $claimName = $this->oidcGroupClaim;
+        $values = $claims->$claimName ?? [];
+        if (!is_array($values)) {
+            $values = [$values];
+        }
+
+        $groups = [];
+        foreach ($values as $value) {
+            foreach ($this->oidcGroupMap[(string)$value] ?? [] as $localGroup) {
+                $groups[] = $localGroup;
+            }
+        }
+        return array_values(array_unique($groups));
+    }
+
+    /**
+     * all local groups this authenticator manages through the group map
+     * @return array list of local group names
+     */
+    public function getManagedGroups()
+    {
+        $groups = [];
+        foreach ($this->oidcGroupMap as $localGroups) {
+            $groups = array_merge($groups, $localGroups);
+        }
+        return array_values(array_unique($groups));
     }
 
     /**
@@ -142,6 +224,64 @@ class OIDC extends Local implements IAuthConnector
                 'help' => gettext('Scopes to request during authentication. The <code>openid</code> scope is required.'),
                 'type' => 'text',
                 'default' => join(',', $this->oidcScopes),
+                'validate' => fn($value) => [],
+            ],
+            'oidc_redirect_uri' => [
+                'name' => gettext('Redirect URI'),
+                'help' => gettext('Fixed callback URL registered at the provider, e.g. <code>https://fw.example.com/api/oidc/auth/callback</code>. When empty it is derived from the request Host header (not recommended).'),
+                'type' => 'text',
+                'validate' => fn($value) => empty($value) || filter_var($value, FILTER_VALIDATE_URL) ? [] : [gettext('Redirect URI needs a valid URL.')],
+            ],
+            'oidc_allowed_tenant' => [
+                'name' => gettext('Allowed tenant ID'),
+                'help' => gettext('Microsoft Entra ID only: reject tokens whose <code>tid</code> claim differs from this tenant ID.'),
+                'type' => 'text',
+                'validate' => fn($value) => [],
+            ],
+            'oidc_use_userinfo' => [
+                'name' => gettext('Query UserInfo endpoint'),
+                'help' => gettext('Merge claims from the UserInfo endpoint into the ID token claims. Leave disabled for Microsoft Entra ID, its UserInfo endpoint does not return <code>preferred_username</code>, <code>roles</code> or <code>groups</code>.'),
+                'type' => 'checkbox',
+                'validate' => fn($value) => [],
+            ],
+            'oidc_match_email' => [
+                'name' => gettext('Match users by email'),
+                'help' => gettext('Also match local users by the <code>email</code> claim. Only enable when the provider guarantees verified, immutable email addresses.'),
+                'type' => 'checkbox',
+                'validate' => fn($value) => [],
+            ],
+
+            // Authorization
+            'oidc_group_claim' => [
+                'name' => gettext('Group claim'),
+                'help' => gettext('Claim holding the user roles or groups, e.g. <code>roles</code> (Entra app roles) or <code>groups</code>.'),
+                'type' => 'text',
+                'default' => $this->oidcGroupClaim,
+                'validate' => fn($value) => [],
+            ],
+            'oidc_group_map' => [
+                'name' => gettext('Group mapping'),
+                'help' => gettext('One <code>claimValue=localGroup</code> per line, e.g. <code>OPNsense.Admin=admins</code>.'),
+                'type' => 'text',
+                'validate' => function ($value) {
+                    foreach (preg_split('/[\r\n,;]+/', (string)$value) as $entry) {
+                        if (trim($entry) !== '' && !str_contains($entry, '=')) {
+                            return [sprintf(gettext('Invalid group mapping entry "%s".'), htmlspecialchars(trim($entry)))];
+                        }
+                    }
+                    return [];
+                },
+            ],
+            'oidc_group_sync' => [
+                'name' => gettext('Synchronize groups'),
+                'help' => gettext('On every login add and remove the user from the mapped local groups. Groups not present in the mapping are left untouched.'),
+                'type' => 'checkbox',
+                'validate' => fn($value) => [],
+            ],
+            'oidc_require_group' => [
+                'name' => gettext('Require mapped group'),
+                'help' => gettext('Deny the login when none of the claim values is present in the group mapping.'),
+                'type' => 'checkbox',
                 'validate' => fn($value) => [],
             ],
 
@@ -233,8 +373,9 @@ $('[name=oidc_default_groups]')
 
 // Handle changing field types
 $('[name=oidc_custom_button]').attr({ rows: 10 })
+$('[name=oidc_group_map]').attr({ rows: 5 })
 $('[name=oidc_client_secret]').attr({ type: 'password', autocomplete: 'off' });
-$('[name=oidc_custom_button]').each((i, elm) => {
+$('[name=oidc_custom_button],[name=oidc_group_map]').each((i, elm) => {
     const ta = $('<textarea>');
     $.each(elm.attributes, (_, attr) => ta.attr(attr.name, attr.value));
     ta.data($(elm).data());
